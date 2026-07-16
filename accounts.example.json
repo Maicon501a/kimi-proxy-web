@@ -1,0 +1,15 @@
+[
+  {
+    "id": "account-1",
+    "email": "you@example.com",
+    "token": "Bearer eyJhbGciOiJIUzUxMiIsInR5cCI6IkpXVCJ9.REPLACE_ME",
+    "deviceId": "0",
+    "sessionId": "0",
+    "shieldData": "sg:xxxx",
+    "trafficId": "",
+    "timezone": "America/Sao_Paulo",
+    "jwtSub": "",
+    "createdAt": "2026-01-01T00:00:00.000Z",
+    "jwtExpiresAt": "2026-02-01T00:00:00.000Z"
+  }
+]

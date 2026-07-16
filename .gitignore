@@ -1,0 +1,40 @@
+# Dependencies
+node_modules/
+.kilo/node_modules/
+package-lock.json
+
+# Secrets & local accounts (NEVER commit)
+accounts.json
+.env
+.env.*
+!.env.example
+
+# Browser profiles / Playwright session data
+browser-data/
+**/playwright-report/
+**/test-results/
+
+# Debug dumps (may contain JWTs, prompts, tool results)
+debug-requests/
+*.jwt
+*.token
+*.pem
+*.key
+
+# Logs & OS junk
+*.log
+npm-debug.log*
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Editor / local tooling
+.vscode/
+.idea/
+*.swp
+.kilo/
+kilo.json
+
+# Optional local overrides
+opencode.json
+opencode.local.json

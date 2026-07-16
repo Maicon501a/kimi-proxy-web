@@ -1,0 +1,34 @@
+{
+  "name": "kimi-proxy-web",
+  "version": "1.0.0",
+  "description": "OpenAI-compatible local proxy for the Kimi web API (K3/K2). Best with OpenCode CLI.",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "start": "node cli.mjs",
+    "server": "node src/server.mjs",
+    "dev": "node --watch src/server.mjs",
+    "add": "node scripts/add-account.mjs",
+    "check": "node scripts/check-accounts.mjs",
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "keywords": [
+    "kimi",
+    "moonshot",
+    "openai-compatible",
+    "proxy",
+    "opencode"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Maicon501a/kimi-proxy-web.git"
+  },
+  "dependencies": {
+    "playwright": "^1.60.0",
+    "playwright-extra": "^4.3.6",
+    "puppeteer-extra-plugin-stealth": "^2.11.2"
+  }
+}
