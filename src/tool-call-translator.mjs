@@ -385,14 +385,72 @@ const TOOL_ECHO_MARKERS = [
   'Glob "',
   'User:\nTool result',
   'call_',
+  'show_widget',
+  'tool_calls_section',
+  'widget_code',
+  'loading_messages',
 ]
+
+// Kimi web agent native tools observed on SCENARIO_K3/K2D5 wire capture.
+// These must never surface as assistant content or OpenAI tool_calls.
+const KIMI_NATIVE_TOOL_NAMES = [
+  'show_widget',
+  'ipython',
+  'web_search',
+  'web_open_url',
+  'search_image_by_text',
+  'search_image_by_image',
+  'get_data_source_desc',
+  'get_data_source',
+  'memory_instruction_edits',
+  'browser',
+  'cron',
+]
+
+const NATIVE_TOOL_NAME_RE = new RegExp(
+  `^(?:${KIMI_NATIVE_TOOL_NAMES.map(n => n.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')})(?::\\d+)?\\s*$`,
+  'i',
+)
+
+function stripKimiNativeToolInvocations(text) {
+  let out = String(text || '')
+
+  // Official-ish Kimi tool markup sometimes leaks into text
+  out = out.replace(/<\|tool_calls_section_begin\|>[\s\S]*?(?:<\|tool_calls_section_end\|>|$)/gi, '')
+  out = out.replace(/<\|tool_call_begin\|>[\s\S]*?(?:<\|tool_call_end\|>|$)/gi, '')
+  out = out.replace(/<\|tool_call_argument_begin\|>[\s\S]*?(?:<\|tool_call_argument_end\|>|$)/gi, '')
+  // Generic Kimi tool markers like <|tool_call_begin|> / <|tool_calls_section_end|>
+  out = out.replace(/<\|\/?tool_[^|>]+\|>/gi, '')
+
+  // Pattern: show_widget:11\n{...json...}  or show_widget\n{...}
+  // Drop the name line + following JSON object/array if present.
+  out = out.replace(
+    new RegExp(
+      `(?:^|\\n)\\s*(?:${KIMI_NATIVE_TOOL_NAMES.map(n => n.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')})(?::\\d+)?\\s*\\n\\s*[\\{\\[][\\s\\S]*`,
+      'gi',
+    ),
+    '\n',
+  )
+
+  // Inline SVG widget dumps
+  out = out.replace(/<svg[\s\S]*?<\/svg>/gi, '')
+  out = out.replace(/"widget_code"\s*:\s*"[\s\S]*?(?:"\s*[,}])/gi, '')
+
+  // Line-level native tool names alone
+  out = out
+    .split('\n')
+    .filter(line => !NATIVE_TOOL_NAME_RE.test(line.trim()))
+    .join('\n')
+
+  return out
+}
 
 export function stripToolEchoFromContent(text) {
   if (!text) return text
-  let out = String(text)
+  let out = stripKimiNativeToolInvocations(String(text))
 
   // Drop fenced dumps that re-print prior tool transcripts
-  out = out.replace(/```[\s\S]*?(?:Tool result \(|<path>|Read [^\n]+\n)[\s\S]*?```/gi, '')
+  out = out.replace(/```[\s\S]*?(?:Tool result \(|<path>|Read [^\n]+\n|show_widget|widget_code)[\s\S]*?```/gi, '')
 
   // Drop lines that clearly re-echo tool plumbing
   out = out
@@ -411,6 +469,11 @@ export function stripToolEchoFromContent(text) {
       if (/^\(Results are truncated/i.test(t)) return false
       if (/^User:\s*$/i.test(t)) return false
       if (/^Assistant:\s*$/i.test(t)) return false
+      if (/^show_widget(?::\d+)?$/i.test(t)) return false
+      if (/^ipython(?::\d+)?$/i.test(t)) return false
+      if (/^"?(?:loading_messages|widget_code|title)"?\s*:/i.test(t)) return false
+      if (/^Editando\s+\S+\.\.\./i.test(t)) return false
+      if (/^Aplicando\s+/i.test(t) && /ediç/i.test(t)) return false
       return true
     })
     .join('\n')
@@ -424,6 +487,9 @@ export function stripToolEchoFromContent(text) {
       out.indexOf('<path>'),
       out.search(/\nRead\s+\S+\./i),
       out.indexOf('from the EXTERNAL IDE'),
+      out.search(/show_widget/i),
+      out.search(/tool_calls_section/i),
+      out.search(/widget_code/i),
     ].filter(i => i >= 0)
     if (cutPoints.length > 0) {
       out = out.slice(0, Math.min(...cutPoints)).trim()
@@ -432,6 +498,12 @@ export function stripToolEchoFromContent(text) {
 
   out = out.replace(/\n{3,}/g, '\n\n').trim()
   return out
+}
+
+export function isKimiNativeToolName(name) {
+  if (!name) return false
+  const n = String(name).trim().toLowerCase()
+  return KIMI_NATIVE_TOOL_NAMES.some(x => x.toLowerCase() === n)
 }
 
 export class ToolCallStreamTranslator {
@@ -453,6 +525,10 @@ export class ToolCallStreamTranslator {
   }
 
   emitToolCall(events, toolCall) {
+    const name = toolCall?.function?.name
+    // Never forward Kimi-native sandbox tools to OpenAI clients.
+    if (isKimiNativeToolName(name)) return
+    if (name && this.tools.length > 0 && !isDeclaredToolName(name, this.tools)) return
     this.seenToolCalls.push(toolCall)
     events.push({ type: 'tool_call', toolCall })
   }
@@ -538,20 +614,27 @@ export class ToolCallStreamTranslator {
 }
 
 export function extractToolCallsFromText(text, tools) {
+  // Always scrub native Kimi tool markup first, even before parsing.
+  const scrubbed = stripKimiNativeToolInvocations(String(text || ''))
   const normalizedTools = normalizeTools(tools)
   const translator = new ToolCallStreamTranslator(tools)
-  const events = [...translator.push(text || ''), ...translator.flush()]
+  const events = [...translator.push(scrubbed), ...translator.flush()]
 
   let content = ''
   const toolCalls = []
   for (const event of events) {
     if (event.type === 'content') content += event.content
-    else if (event.type === 'tool_call') toolCalls.push(event.toolCall)
+    else if (event.type === 'tool_call') {
+      const name = event.toolCall?.function?.name
+      if (isKimiNativeToolName(name)) continue
+      toolCalls.push(event.toolCall)
+    }
   }
 
   if (toolCalls.length === 0 && normalizedTools.length > 0) {
-    const trimmed = String(text || '').trim()
+    const trimmed = scrubbed.trim()
     const rawJsonToolCalls = parseJsonToolCalls(trimmed, normalizedTools)
+      .filter(tc => !isKimiNativeToolName(tc?.function?.name))
     if (rawJsonToolCalls.length > 0) {
       return {
         content: null,

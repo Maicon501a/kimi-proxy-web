@@ -213,7 +213,9 @@ Native Kimi web agent tools (`ipython`, `/mnt/agents/*`, etc.) are **disabled/de
 |---|---|---|
 | `PORT` | `8080` | Listen port |
 | `API_KEY` | empty | If set, require `Authorization: Bearer …` |
-| `DEBUG_REQUESTS` | off | Save incoming request JSON under `debug-requests/` (gitignored) |
+| `REQUEST_LOG` | **`true`** | Console request/response logs. Set `false` / `0` / `off` to silence |
+| `DEBUG_DUMP` | `false` | Save full request JSON under `debug-requests/` (gitignored) |
+| `DEBUG_REQUESTS` | — | Alias: `true` enables dump; `false` disables `REQUEST_LOG` |
 
 ---
 

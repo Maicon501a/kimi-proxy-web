@@ -317,6 +317,28 @@ test('extractToolCallsFromText drops prose when tool calls are present', () => {
   assert.equal(translated.tool_calls[0].function.name, 'read_file')
 })
 
+test('strips Kimi native show_widget leaks from content', () => {
+  const text = [
+    'vou aplicar as edições',
+    'show_widget:11',
+    '{"loading_messages":"Editando router.go...","widget_code":"<svg>x</svg>"}',
+  ].join('\n')
+  const translated = extractToolCallsFromText(text, TOOLS)
+  assert.equal(translated.finish_reason, 'stop')
+  assert.equal(translated.tool_calls, undefined)
+  assert.match(translated.content || '', /vou aplicar as edições/i)
+  assert.doesNotMatch(translated.content || '', /show_widget/i)
+  assert.doesNotMatch(translated.content || '', /widget_code/i)
+  assert.doesNotMatch(translated.content || '', /<svg/i)
+})
+
+test('never forwards native show_widget as OpenAI tool_call', () => {
+  const text = '<tool_call>{"name":"show_widget","arguments":{"title":"x"}}</tool_call>'
+  const translated = extractToolCallsFromText(text, TOOLS)
+  assert.equal(translated.tool_calls, undefined)
+  assert.equal(translated.finish_reason, 'stop')
+})
+
 test('OpenAIStreamResponseTranslator increments tool call indexes for multiple calls', () => {
   const translator = new OpenAIStreamResponseTranslator('multi123', 'kimi-latest', TOOLS)
 

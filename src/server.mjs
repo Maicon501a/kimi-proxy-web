@@ -10,11 +10,49 @@ import { buildCompleteOpenAIResponse, OpenAIStreamResponseTranslator } from './r
 
 const PORT = process.env.PORT || 8080
 const API_KEY = process.env.API_KEY || ''
-const DEBUG_REQUESTS = process.env.DEBUG_REQUESTS === '1' || process.env.DEBUG_REQUESTS === 'true'
+// Request logging mode: default ON. Set REQUEST_LOG=false|0|off to disable.
+// Alias: DEBUG_REQUESTS=false also disables. DEBUG_REQUESTS=1 keeps dumps on disk.
+const REQUEST_LOG = (() => {
+  const raw = process.env.REQUEST_LOG ?? process.env.DEBUG_REQUESTS
+  if (raw === undefined || raw === '') return true
+  const v = String(raw).trim().toLowerCase()
+  if (['0', 'false', 'off', 'no'].includes(v)) return false
+  if (['1', 'true', 'on', 'yes'].includes(v)) return true
+  return true
+})()
+const DEBUG_DUMP = process.env.DEBUG_DUMP === '1' || process.env.DEBUG_DUMP === 'true'
+  || process.env.DEBUG_REQUESTS === '1' || process.env.DEBUG_REQUESTS === 'true'
 const DEBUG_DIR = resolve(import.meta.dirname, '..', 'debug-requests')
 
-function maybeLogIncomingRequest(body, req) {
-  if (!DEBUG_REQUESTS) return null
+function ts() {
+  return new Date().toISOString()
+}
+
+function previewText(value, max = 160) {
+  if (value == null) return ''
+  const text = typeof value === 'string' ? value : JSON.stringify(value)
+  const oneLine = text.replace(/\s+/g, ' ').trim()
+  if (oneLine.length <= max) return oneLine
+  return `${oneLine.slice(0, max)}…`
+}
+
+function logInfo(...args) {
+  if (!REQUEST_LOG) return
+  console.log(`[${ts()}]`, ...args)
+}
+
+function logWarn(...args) {
+  if (!REQUEST_LOG) return
+  console.warn(`[${ts()}]`, ...args)
+}
+
+function logError(...args) {
+  // errors always print
+  console.error(`[${ts()}]`, ...args)
+}
+
+function maybeDumpIncomingRequest(body, req) {
+  if (!DEBUG_DUMP) return null
   try {
     mkdirSync(DEBUG_DIR, { recursive: true })
     const stamp = new Date().toISOString().replace(/[:.]/g, '-')
@@ -33,11 +71,6 @@ function maybeLogIncomingRequest(body, req) {
         : [],
       messagesCount: Array.isArray(body?.messages) ? body.messages.length : 0,
       messageRoles: Array.isArray(body?.messages) ? body.messages.map(m => m?.role) : [],
-      systemPreview: Array.isArray(body?.messages)
-        ? body.messages
-            .filter(m => m?.role === 'system')
-            .map(m => (typeof m.content === 'string' ? m.content : JSON.stringify(m.content)).slice(0, 500))
-        : [],
       lastUserPreview: (() => {
         const users = (body?.messages || []).filter(m => m?.role === 'user')
         const last = users[users.length - 1]
@@ -48,10 +81,10 @@ function maybeLogIncomingRequest(body, req) {
       body,
     }
     writeFileSync(file, JSON.stringify(summary, null, 2), 'utf-8')
-    console.log(`[debug] saved request ${file} tools=${summary.toolsCount} stream=${summary.stream} model=${summary.model}`)
+    logInfo(`[dump] saved ${file}`)
     return file
   } catch (e) {
-    console.error('[debug] failed to log request', e.message)
+    logError('[dump] failed', e.message)
     return null
   }
 }
@@ -98,26 +131,52 @@ export function createProxyServer(options = {}) {
   }
 
   async function handleChatCompletions(req, res) {
-    if (!checkAuthForServer(req)) return error(res, 401, 'Invalid API key')
+    const started = Date.now()
+    if (!checkAuthForServer(req)) {
+      logWarn('[req] chat/completions 401 invalid api key')
+      return error(res, 401, 'Invalid API key')
+    }
 
     let body
     try {
       const rawBody = await readBody(req)
       body = JSON.parse(rawBody)
     } catch {
+      logWarn('[req] chat/completions 400 invalid json')
       return error(res, 400, 'Invalid JSON body')
     }
 
-    maybeLogIncomingRequest(body, req)
+    maybeDumpIncomingRequest(body, req)
 
     const { model, messages, stream, tools, tool_choice, useSearch } = parseOpenAIRequest(body)
+    const toolNames = Array.isArray(tools)
+      ? tools.map(t => t?.function?.name || t?.name || t?.type).filter(Boolean)
+      : []
+    const lastUser = [...(messages || [])].reverse().find(m => m?.role === 'user')
+    const lastUserPreview = lastUser
+      ? previewText(typeof lastUser.content === 'string' ? lastUser.content : lastUser.content, 180)
+      : ''
+
+    logInfo(
+      `[req] POST /v1/chat/completions model=${model} stream=${!!stream}` +
+      ` msgs=${messages?.length || 0} tools=${toolNames.length}` +
+      ` tool_choice=${JSON.stringify(tool_choice ?? 'auto')}` +
+      ` search=${!!useSearch}` +
+      (toolNames.length ? ` toolNames=[${toolNames.slice(0, 12).join(',')}${toolNames.length > 12 ? ',…' : ''}]` : '') +
+      (lastUserPreview ? ` user="${lastUserPreview}"` : ''),
+    )
 
     if (!messages || messages.length === 0) {
+      logWarn('[req] chat/completions 400 messages required')
       return error(res, 400, 'messages array is required')
     }
 
     const account = pool.acquire()
-    if (!account) return error(res, 503, 'No active accounts')
+    if (!account) {
+      logWarn('[req] chat/completions 503 no active accounts')
+      return error(res, 503, 'No active accounts')
+    }
+    logInfo(`[req] account=${account.id}`)
 
     const prevChatId = lastChatIds.get(account.id)
     if (prevChatId) {
@@ -128,20 +187,28 @@ export function createProxyServer(options = {}) {
     const modelCfg = resolveModelFn(model)
     const chatBody = buildChatBodyFn(messages, modelCfg, { useSearch, tools, toolChoice: tool_choice })
     const completionId = newCompletionId()
+    logInfo(
+      `[kimi] send scenario=${modelCfg.scenario} model=${modelCfg.model || model}` +
+      ` enablePlugin=${chatBody?.options?.enablePlugin === true}` +
+      ` tools=${Array.isArray(chatBody?.tools) ? chatBody.tools.length : 0}`,
+    )
 
     let kimiRes
     try {
       kimiRes = await sendChatFn(account, chatBody)
     } catch (e) {
       pool.reportError(account, 0)
+      logError(`[kimi] request failed account=${account.id}: ${e.message}`)
       return error(res, 502, `Kimi request failed: ${e.message}`)
     }
 
     if (!kimiRes.ok) {
       pool.reportError(account, kimiRes.status)
       const txt = await kimiRes.text().catch(() => '')
+      logError(`[kimi] http ${kimiRes.status} account=${account.id}: ${previewText(txt, 200)}`)
       return error(res, kimiRes.status, `Kimi returned ${kimiRes.status}: ${txt.slice(0, 200)}`)
     }
+    logInfo(`[kimi] http ${kimiRes.status} stream-open account=${account.id}`)
 
     let newChatId = null
     let streamError = null
@@ -166,18 +233,27 @@ export function createProxyServer(options = {}) {
         }
       } catch (e) {
         pool.reportError(account, 0)
+        logError(`[kimi] parse error: ${e.message}`)
         return error(res, 502, `Stream parse error: ${e.message}`)
       }
 
       if (streamError) {
         pool.reportError(account, streamError.code)
         const code = /unauth/i.test(String(streamError.code)) ? 401 : 502
+        logError(`[kimi] stream error ${streamError.code}: ${streamError.message}`)
         return error(res, code, `Kimi stream error: ${streamError.code}: ${streamError.message}`)
       }
 
       pool.reportSuccess(account)
       if (newChatId) lastChatIds.set(account.id, newChatId)
-      return json(res, 200, buildCompleteOpenAIResponse(completionId, model, fullText, tools))
+      const response = buildCompleteOpenAIResponse(completionId, model, fullText, tools)
+      const finish = response?.choices?.[0]?.finish_reason
+      const toolCalls = response?.choices?.[0]?.message?.tool_calls?.length || 0
+      logInfo(
+        `[res] non-stream finish=${finish} tool_calls=${toolCalls}` +
+        ` chars=${fullText.length} chatId=${newChatId || '-'} ms=${Date.now() - started}`,
+      )
+      return json(res, 200, response)
     }
 
     res.writeHead(200, {
@@ -210,12 +286,13 @@ export function createProxyServer(options = {}) {
         }
       }
     } catch (e) {
-      console.error('[Stream Error]', e.message)
+      logError(`[stream] error: ${e.message}`)
       streamError = { code: 'stream_error', message: e.message }
     }
 
     if (streamError) {
       pool.reportError(account, streamError.code)
+      logError(`[res] stream error ${streamError.code}: ${streamError.message} ms=${Date.now() - started}`)
       res.write(sseLine({
         error: {
           message: `Kimi stream error: ${streamError.code}: ${streamError.message}`,
@@ -236,6 +313,10 @@ export function createProxyServer(options = {}) {
     }
     res.write(SSE_DONE)
     res.end()
+    logInfo(
+      `[res] stream done tool_calls=${responseTranslator.emittedToolCalls ? 'yes' : 'no'}` +
+      ` chatId=${newChatId || '-'} ms=${Date.now() - started}`,
+    )
   }
 
   function handleModels(req, res) {
@@ -267,29 +348,52 @@ export function createProxyServer(options = {}) {
   const server = createServer(async (req, res) => {
     const url = new URL(req.url, `http://localhost:${port}`)
     const path = url.pathname
+    const started = Date.now()
+
+    // Always log lightweight access for non-chat routes when REQUEST_LOG is on.
+    // chat/completions has richer logs inside the handler.
+    if (path !== '/v1/chat/completions') {
+      logInfo(`[http] ${req.method} ${path}`)
+    }
 
     try {
       if (path === '/v1/chat/completions' && req.method === 'POST') {
         return await handleChatCompletions(req, res)
       }
       if (path === '/v1/models' && req.method === 'GET') {
-        return handleModels(req, res)
+        handleModels(req, res)
+        logInfo(`[http] ${req.method} ${path} -> 200 ms=${Date.now() - started}`)
+        return
       }
       if (path === '/status' && req.method === 'GET') {
-        return handleStatus(req, res)
+        handleStatus(req, res)
+        logInfo(`[http] ${req.method} ${path} -> 200 ms=${Date.now() - started}`)
+        return
       }
       if (path === '/admin/reload' && req.method === 'POST') {
-        return await handleAdminReload(req, res)
+        await handleAdminReload(req, res)
+        logInfo(`[http] ${req.method} ${path} -> 200 ms=${Date.now() - started}`)
+        return
       }
       if (path === '/admin/reactivate' && req.method === 'POST') {
-        return await handleAdminReactivate(req, res)
+        await handleAdminReactivate(req, res)
+        logInfo(`[http] ${req.method} ${path} -> 200 ms=${Date.now() - started}`)
+        return
       }
       if (path === '/' || path === '/health') {
-        return json(res, 200, { service: 'proxy-kimi', status: 'running', accounts: pool.count })
+        json(res, 200, {
+          service: 'proxy-kimi',
+          status: 'running',
+          accounts: pool.count,
+          request_log: REQUEST_LOG,
+          debug_dump: DEBUG_DUMP,
+        })
+        return
       }
+      logWarn(`[http] ${req.method} ${path} -> 404`)
       error(res, 404, 'Not found')
     } catch (e) {
-      console.error('[Server]', e)
+      logError('[Server]', e)
       error(res, 500, e.message)
     }
   })
@@ -305,5 +409,7 @@ if (isMainModule) {
     console.log(`[proxy-kimi] Listening on http://localhost:${PORT}`)
     console.log(`[proxy-kimi] ${pool.count} account(s) loaded`)
     console.log(`[proxy-kimi] API Key auth: ${API_KEY ? 'enabled' : 'disabled'}`)
+    console.log(`[proxy-kimi] REQUEST_LOG: ${REQUEST_LOG ? 'ON (default)' : 'OFF'}  (set REQUEST_LOG=false to disable)`)
+    console.log(`[proxy-kimi] DEBUG_DUMP: ${DEBUG_DUMP ? 'ON' : 'OFF'}  (set DEBUG_DUMP=true to save full JSON under debug-requests/)`)
   })
 }

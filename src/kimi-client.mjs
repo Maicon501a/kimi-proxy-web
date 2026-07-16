@@ -70,6 +70,8 @@ const KIMI_PROXY_RUNTIME_RULES = [
   'Do not claim to have searched the web, opened websites, created files, inspected a repository, or completed external actions unless that information is explicitly provided in the conversation or through the proxy tool format below.',
   'The only tools you may use are the explicit proxy-managed tools described later in this prompt (OpenCode/IDE tools).',
   'If no explicit proxy-managed tools are provided, answer with plain text only and do not simulate tool execution or list Kimi sandbox tools.',
+  'Never emit show_widget, widget_code, SVG status widgets, loading_messages, or any Kimi-native tool markup (including show_widget:N or <|tool_call...|>).',
+  'To edit files, use only the proxy tools named in TOOLS AVAILABLE (for example edit/write/read/glob/bash). Never pretend you already applied an edit without a tool call.',
 ]
 
 function buildKimiGuardInstructions(hasTools, nativeSearchEnabled) {
